@@ -1,0 +1,188 @@
+#!/bin/bash
+
+myself="`readlink -f "$0"`"
+mydir="`dirname "$myself"`"
+
+dir=`mktemp -d`
+
+unset keep_tmp
+
+cleanup(){
+    if [ -d "$dir" ]; then
+	if [ "$keep_tmp" = y ]; then
+	    echo "Temporary files stored in $dir"
+	else
+	    rm -rf "$dir"
+	fi
+    fi
+}
+
+trap cleanup 0
+
+help(){
+    cat <<EOF
+Usage: diff-cmsnote [-k] A B ID
+
+  -k: keep tempory files
+  A: -r REV_A or -f DIR_A
+  B: -r REV_B or -f DIR_B
+  ID: note or paper ID, e.g. SMP-2015-016
+
+EOF
+}
+
+wd="`pwd`"
+
+unset rev1
+unset rev2
+unset dir1
+unset dir2
+nf=0
+while true; do
+    case "$1" in
+	-h|--help) help; exit 0;;
+	-k) keep_tmp=y; shift;;
+	-r) [ $nf = 0 ] && rev1="$2" || rev2="$2"; nf=$((nf+1)); shift 2;;
+	-d) [ $nf = 0 ] && dir1="`readlink -f "$2"`" || dir2="`readlink -f "$2"`"; nf=$((nf+1)); shift 2;;
+	*) break;;
+    esac
+done
+
+[ -n "$rev1" ] && co1_opt="-r $rev1"
+[ -n "$rev2" ] && co2_opt="-r $rev2"
+
+
+if [ "$nf" != 2 ]; then
+   echo "Two versions must be provided with two -r REV and two -d DIR, or one of each." 1>&2
+   exit 1
+fi
+
+[ -n "$1" ] || { echo "A CMS note or paper ID must be provided as argument." 1>&2; exit 1; }
+    
+
+note_id="$1"
+echo ${note_id} | grep -q AN  && type=notes || type=papers
+
+cd "$dir" || exit 1
+
+svn co -N svn+ssh://svn.cern.ch/reps/tdr2 A
+cd A || { echo "Failure"; exit 1;}
+svn update utils
+svn update -N $type
+cp -a ../A ../B
+
+if [ -n "$rev1" ]; then
+    svn update $co1_opt $type/${note_id}
+else
+    cp -a "$dir1"/* . || { echo "Failed to copy $dir1 directory content." 1>&2; exit 1; }
+fi
+
+cd ../B || { echo "Failure"; exit 1;}
+
+if [ -n "$rev2" ]; then
+    svn update $co2_opt $type/${note_id}
+else
+    cp -a "$dir2"/* . || { echo "Failed to copy $dir1 directory content." 1>&2; exit 1; }
+fi
+
+cd .. || { echo "Failure"; exit 1;}
+
+[ $type =  notes ] && style=an || style=paper
+
+export style
+
+cat > A/$type/compile_for_diff <<EOF
+#!/bin/bash
+myself="\`readlink -f "\$0"\`"
+mydir="\`dirname "\$myself"\`"
+
+note_id="\$1"
+
+tmp="\`\$mydir/../utils/trunk/tdr runtime -sh\`"
+[ \$? = 0 ] || exit 1
+eval "\$tmp"
+tdr --export --style=$style b "\$note_id"
+cp -a "\$mydir/../utils/trunk/tmp/\${note_id}_temp.pdf" . && echo "\${note_id}_temp.pdf copied into current directory (\`pwd\`)"
+cp -a "\$mydir/../utils/trunk/tmp/\${note_id}.tgz" . && echo "\${note_id}.tgz copied into current directory (\`pwd\`)"
+EOF
+
+chmod a+x A/$type/compile_for_diff
+
+cp -a {A,B}/$type/compile_for_diff
+
+compile(){
+    ( cd "$1/$type" || { echo "Directory `pwd`/$1/$type was not found!" 1>&2 ; exit 1; }
+      ./compile_for_diff ${note_id}
+    )
+}
+
+compile A
+rc_compile_A=$?
+
+compile B
+rc_compile_B=$?
+
+#tar xzf /home/pgras/work/cms/smp-16-015_ref/utils/trunk/tmp/SMP-16-015.tgz
+#mv export/ old || exit 1
+#./diff-preprocess old/SMP-16-015_temp.tex
+
+if [ $rc_compile_A = 0 ]; then
+    tar xzf "A/$type/${note_id}.tgz" export \
+	&& mv export A.exported \
+	&& sed -i 's/^\\newcommand{\\cmsPubBlock}{.*}$/\\newcommand{\\cmsPubBlock}{}/' A.exported/cms-tdr.cls
+    rc_export_A=$?
+fi
+
+if [ $rc_compile_B = 0 ]; then
+    tar xzf "B/$type/${note_id}.tgz" export \
+	&& mv export B.exported \
+	&& sed -i 's/^\\newcommand{\\cmsPubBlock}{.*}$/\\newcommand{\\cmsPubBlock}{}/' B.exported/cms-tdr.cls
+    rc_export_B=$?
+fi
+
+[ "$rc_export_A" = 0 -a "$rc_export_B" = 0 ] && "$mydir/diff-preprocess" A.exported/${note_id}_temp.tex  B.exported/${note_id}_temp.tex
+rc_preproc=$?
+
+
+if [ $rc_preproc = 0 ]; then
+    latexdiff-fast --append-textcmd=newcommand --append-context2cmd=abstract -p "$mydir/diff-preamble"  {A.exported,B.exported}/${note_id}_temp.tex > B.exported/${note_id}_diff.tex
+    rc_latexdiff=$?
+fi
+
+cd B.exported/ || { echo "Failure" 1>&2; exit 1; }
+
+
+
+pdflatex ${note_id}_diff \
+    && bibtex ${note_id}_diff \
+    && pdflatex ${note_id}_diff \
+    && pdflatex ${note_id}_diff
+mv ${note_id}_diff.pdf "$wd/"
+
+rc_pdflatex=$?
+
+[ $rc_pdflatex = 0 ] && echo "Document difference done: ${note_id}_diff.pdf"
+
+status(){
+    if [ "$1" = 0 ]; then
+	echo succeeded
+    else
+	echo failed
+    fi
+       
+}
+
+cat <<EOF
+    Version A latex compilation: `status $rc_compile_A`
+    Version B latex compilation: `status $rc_compile_B`
+    Version A latex export: `status $rc_export_A`
+    Version B latex export: `status $rc_export_B`
+    Latex preprocessing: `status $rc_preproc`
+    Latex diff generation: `status $rc_latexdiff`
+    Latex diff compilation:`status $rc_pdflatex` 
+EOF
+
+
+
+
+

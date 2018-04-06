@@ -1,0 +1,21 @@
+#!/bin/bash
+
+file1="$1"
+file2="$2"
+
+Id="`sed -n  's/^\(\\\\RCS\$Id:.*\$\).*/\1/p' "$file1" | sed 's@\\\\@\\\\\\\\@g'`"
+
+[ $? = 0 ] || { echo "RCS If not found in $file1"; exit 1; }
+
+Rev1="`sed -n  's/^\\\\RCS\\\$Revision:[[:space:]]*\(.*\)\$.*/\1/p' "$file1"`"
+Rev2="`sed -n  's/^\\\\RCS\\\$Revision:[[:space:]]*\(.*\)\$.*/\1/p' "$file2"`"
+Rev="\\\\RCS\$Revision: $Rev1 - $Rev2\\\$"
+
+for f in "$file1" "$file2"; do
+    [ -n "$f" ] || continue
+sed -i 's@\\def\\svnVersion{.*}@\\def\\svnVersion{}\n\\newcommand{\\cmsSTYLE}{paper}@
+    s@\\RCS\$Revision:.*\$@'"$Rev"'@
+    s@\\RCS\$HeadURL: .*\$@\\RCS$HeadURL: $@
+    s@\\RCS\$Id: .*\$@'"$Id"'@
+    s@\\cmsNoteHeader.*@@' "$f"
+done
